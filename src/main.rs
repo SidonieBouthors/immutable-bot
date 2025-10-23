@@ -284,7 +284,7 @@ async fn handle_guesswho(bot: teloxide::Bot, msg: Message, state: Bot) -> Respon
     .is_anonymous(false)
     .type_(teloxide::types::PollType::Quiz)
     .correct_option_id(correct_option_id)
-    .explanation(format!("🗓️ Saved on {}", formatted_date))
+    .explanation(format!("🗓️ Quote from {}", formatted_date))
     .await?;
 
     Ok(())
