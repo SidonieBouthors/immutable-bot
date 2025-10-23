@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
-use rand::SeedableRng;
 use rand::seq::SliceRandom;
+use rand::{Rng, SeedableRng};
 use sqlx::sqlite::SqlitePool;
 use teloxide::{prelude::*, utils::command::BotCommands};
 
@@ -19,6 +19,8 @@ enum Command {
     Quote,
     #[command(description = "Create a 'guess who said this' poll")]
     GuessWho,
+    #[command(description = "Send a group hug to everyone!")]
+    Hug,
 }
 
 #[derive(sqlx::FromRow)]
@@ -83,6 +85,7 @@ async fn answer(bot: teloxide::Bot, msg: Message, cmd: Command, state: Bot) -> R
         }
         Command::Quote => handle_quote(bot, msg, state).await,
         Command::GuessWho => handle_guesswho(bot, msg, state).await,
+        Command::Hug => handle_hug(bot, msg).await,
     }
 }
 
@@ -221,6 +224,38 @@ async fn handle_guesswho(bot: teloxide::Bot, msg: Message, state: Bot) -> Respon
     .correct_option_id(correct_option_id)
     .explanation(format!("🗓️ Saved on {}", formatted_date))
     .await?;
+
+    Ok(())
+}
+
+async fn handle_hug(bot: teloxide::Bot, msg: Message) -> ResponseResult<()> {
+    const HUG_MESSAGES: &[&str] = &[
+        "( っ˶´ ˘ `)っ",
+        "♡⸜(ˆᗜˆ˵ )⸝♡",
+        "(っᵔ◡ᵔ)っ",
+        "(づ> v <)づ♡",
+        "ʕっ•ᴥ•ʔっ ♡",
+        "◝(ᵔᗜᵔ)◜",
+        "(૭ ｡•̀ ᵕ •́｡ )૭",
+        "(⊙ _ ⊙ )",
+        "(◍•ᴗ•◍)❤",
+        "≽^•⩊•^≼",
+        "ᕙ(  •̀ ᗜ •́  )ᕗ",
+        "( ⊃ ◕ _ ◕)⊃",
+        "༼つ◕_◕༽つ",
+        "(ㅅ´ ˘ `)",
+        "(˵ •̀ ᴗ - ˵ ) ✧",
+        "(❀❛ ֊ ❛„)♡",
+    ];
+
+    let mut rng = rand::rngs::StdRng::from_entropy();
+    let index = rng.gen_range(0..HUG_MESSAGES.len());
+    let text = HUG_MESSAGES[index];
+
+    bot.send_message(msg.chat.id, text)
+        // MarkdownV2 for bold/italic text
+        .parse_mode(teloxide::types::ParseMode::MarkdownV2)
+        .await?;
 
     Ok(())
 }
