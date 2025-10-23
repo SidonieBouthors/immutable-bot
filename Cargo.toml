@@ -6,8 +6,14 @@ edition = "2024"
 [dependencies]
 teloxide = { version = "0.12", features = ["macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-sqlx = { version = "0.7", features = ["runtime-tokio-native-tls", "sqlite"] }
+sqlx = { version = "0.7", features = [
+  "runtime-tokio-native-tls",
+  "sqlite",
+  "chrono",
+] }
 log = "0.4"
 pretty_env_logger = "0.5"
 dotenv = "0.15"
 rand = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.8"
