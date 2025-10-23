@@ -26,6 +26,7 @@ enum Command {
 #[derive(sqlx::FromRow)]
 struct Quote {
     id: i64,
+    chat_id: i64,
     user_id: i64,
     username: Option<String>,
     message_text: String,
@@ -49,6 +50,7 @@ async fn main() {
         r#"
         CREATE TABLE IF NOT EXISTS quotes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
             user_id INTEGER NOT NULL,
             username TEXT,
             message_text TEXT NOT NULL,
@@ -95,10 +97,12 @@ async fn handle_quote(bot: teloxide::Bot, msg: Message, state: Bot) -> ResponseR
             let user_id = replied_msg.from().map(|u| u.id.0 as i64).unwrap_or(0);
             let username = replied_msg.from().and_then(|u| u.username.clone());
             let original_date = replied_msg.date;
+            let chat_id = msg.chat.id.0;
 
             let result = sqlx::query(
-                "INSERT INTO quotes (user_id, username, message_text, message_date) VALUES (?, ?, ?, ?)",
+                "INSERT INTO quotes (chat_id, user_id, username, message_text, message_date) VALUES (?, ?, ?, ?, ?)",
             )
+            .bind(chat_id)
             .bind(user_id)
             .bind(username.as_deref())
             .bind(text)
@@ -140,9 +144,12 @@ async fn handle_quote(bot: teloxide::Bot, msg: Message, state: Bot) -> ResponseR
 }
 
 async fn handle_guesswho(bot: teloxide::Bot, msg: Message, state: Bot) -> ResponseResult<()> {
+    let chat_id = msg.chat.id.0;
+    
     // Get all unique users who have quotes
     let users: Vec<(i64, Option<String>)> =
-        sqlx::query_as("SELECT DISTINCT user_id, username FROM quotes")
+        sqlx::query_as("SELECT DISTINCT user_id, username FROM quotes WHERE chat_id = ?")
+            .bind(chat_id)
             .fetch_all(&state.db)
             .await
             .unwrap_or_default();
@@ -158,8 +165,9 @@ async fn handle_guesswho(bot: teloxide::Bot, msg: Message, state: Bot) -> Respon
 
     // Get a random quote
     let quote: Option<Quote> = sqlx::query_as(
-        "SELECT id, user_id, username, message_text, message_date FROM quotes ORDER BY RANDOM() LIMIT 1",
+        "SELECT id, user_id, username, message_text, message_date FROM quotes WHERE chat_id = ? ORDER BY RANDOM() LIMIT 1",
     )
+    .bind(chat_id)
     .fetch_optional(&state.db)
     .await
     .unwrap_or(None);
