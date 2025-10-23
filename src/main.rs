@@ -1,5 +1,7 @@
 use sqlx::sqlite::SqlitePool;
 use teloxide::{prelude::*, utils::command::BotCommands};
+use rand::seq::SliceRandom;
+use rand::SeedableRng;
 
 #[derive(Clone)]
 struct Bot {
@@ -11,15 +13,26 @@ struct Bot {
 enum Command {
     #[command(description = "Save a quote (reply to a message)")]
     Quote,
+    #[command(description = "Create a 'guess who said this' poll")]
+    GuessWho,
+}
+
+#[derive(sqlx::FromRow)]
+struct Quote {
+    id: i64,
+    user_id: i64,
+    username: Option<String>,
+    message_text: String,
 }
 
 #[tokio::main]
 async fn main() {
+    dotenv::dotenv().ok();
     pretty_env_logger::init();
     log::info!("Starting Immutable Bot...");
 
     // Initialize database
-    let db = SqlitePool::connect("sqlite:/data/quotes.db")
+    let db = SqlitePool::connect("sqlite:data/quotes.db?mode=rwc")
         .await
         .expect("Failed to connect to database");
     
@@ -59,52 +72,137 @@ async fn main() {
 
 async fn answer(bot: teloxide::Bot, msg: Message, cmd: Command, state: Bot) -> ResponseResult<()> {
     match cmd {
-        Command::Quote => {
-            if let Some(replied_msg) = msg.reply_to_message() {
-                if let Some(text) = replied_msg.text() {
-                    let user_id = replied_msg.from().map(|u| u.id.0 as i64).unwrap_or(0);
-                    let username = replied_msg.from().and_then(|u| u.username.clone());
-                    
-                    let result = sqlx::query(
-                        "INSERT INTO quotes (user_id, username, message_text) VALUES (?, ?, ?)"
-                    )
-                    .bind(user_id)
-                    .bind(username.as_deref())
-                    .bind(text)
-                    .execute(&state.db)
-                    .await;
+        Command::Quote => handle_quote(bot, msg, state).await,
+        Command::GuessWho => handle_guesswho(bot, msg, state).await,
+    }
+}
 
-                    match result {
-                        Ok(_) => {
-                            let user_display = username
-                                .map(|u| format!("@{}", u))
-                                .unwrap_or_else(|| format!("User {}", user_id));
-                            
-                            bot.send_message(
-                                msg.chat.id,
-                                format!("✅ Quote saved from {}!", user_display)
-                            )
-                            .await?;
-                        }
-                        Err(e) => {
-                            log::error!("Database error: {}", e);
-                            bot.send_message(msg.chat.id, "❌ Failed to save quote")
-                                .await?;
-                        }
-                    }
-                } else {
-                    bot.send_message(msg.chat.id, "⚠️ Can only save text messages")
+async fn handle_quote(bot: teloxide::Bot, msg: Message, state: Bot) -> ResponseResult<()> {
+    if let Some(replied_msg) = msg.reply_to_message() {
+        if let Some(text) = replied_msg.text() {
+            let user_id = replied_msg.from().map(|u| u.id.0 as i64).unwrap_or(0);
+            let username = replied_msg.from().and_then(|u| u.username.clone());
+            
+            let result = sqlx::query(
+                "INSERT INTO quotes (user_id, username, message_text) VALUES (?, ?, ?)"
+            )
+            .bind(user_id)
+            .bind(username.as_deref())
+            .bind(text)
+            .execute(&state.db)
+            .await;
+
+            match result {
+                Ok(_) => {
+                    let user_display = username
+                        .map(|u| format!("@{}", u))
+                        .unwrap_or_else(|| format!("User {}", user_id));
+                    
+                    bot.send_message(
+                        msg.chat.id,
+                        format!("✅ Quote saved from {}!", user_display)
+                    )
+                    .await?;
+                }
+                Err(e) => {
+                    log::error!("Database error: {}", e);
+                    bot.send_message(msg.chat.id, "❌ Failed to save quote")
                         .await?;
                 }
-            } else {
-                bot.send_message(
-                    msg.chat.id,
-                    "⚠️ Please reply to a message with /quote to save it"
-                )
-                .await?;
             }
+        } else {
+            bot.send_message(msg.chat.id, "⚠️ Can only save text messages")
+                .await?;
         }
+    } else {
+        bot.send_message(
+            msg.chat.id,
+            "⚠️ Please reply to a message with /quote to save it"
+        )
+        .await?;
+    }
+    
+    Ok(())
+}
+
+async fn handle_guesswho(bot: teloxide::Bot, msg: Message, state: Bot) -> ResponseResult<()> {
+    // Get all unique users who have quotes
+    let users: Vec<(i64, Option<String>)> = sqlx::query_as(
+        "SELECT DISTINCT user_id, username FROM quotes"
+    )
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    if users.len() < 2 {
+        bot.send_message(
+            msg.chat.id,
+            "⚠️ Need at least 2 different people with saved quotes to play!"
+        )
+        .await?;
+        return Ok(());
     }
 
+    // Get a random quote
+    let quote: Option<Quote> = sqlx::query_as(
+        "SELECT id, user_id, username, message_text FROM quotes ORDER BY RANDOM() LIMIT 1"
+    )
+    .fetch_optional(&state.db)
+    .await
+    .unwrap_or(None);
+
+    let quote = match quote {
+        Some(q) => q,
+        None => {
+            bot.send_message(msg.chat.id, "❌ No quotes found in database")
+                .await?;
+            return Ok(());
+        }
+    };
+
+    // Create poll options: correct answer + random other users
+    let correct_answer = format_user_display(quote.user_id, quote.username.as_deref());
+    
+    let mut options = vec![correct_answer.clone()];
+    let mut rng = rand::rngs::StdRng::from_entropy();
+    
+    // Add up to 3 other random users as options
+    let other_users: Vec<String> = users
+        .iter()
+        .filter(|(id, _)| *id != quote.user_id)
+        .map(|(id, username)| format_user_display(*id, username.as_deref()))
+        .collect();
+    
+    let num_options = std::cmp::min(3, other_users.len());
+    let mut selected_others: Vec<String> = other_users
+        .choose_multiple(&mut rng, num_options)
+        .cloned()
+        .collect();
+    
+    options.append(&mut selected_others);
+    
+    // Shuffle options so correct answer isn't always first
+    options.shuffle(&mut rng);
+    
+    // Find the correct answer index
+    let correct_option_id = options
+        .iter()
+        .position(|opt| opt == &correct_answer)
+        .unwrap_or(0) as u8;
+
+    // Send the poll
+    bot.send_poll(msg.chat.id, "Who said this?", options)
+        .is_anonymous(false)
+        .type_(teloxide::types::PollType::Quiz)
+        .correct_option_id(correct_option_id)
+        .explanation(format!("\"{}\"", quote.message_text))
+        .await?;
+
     Ok(())
+}
+
+fn format_user_display(user_id: i64, username: Option<&str>) -> String {
+    username
+        .map(|u| format!("@{}", u))
+        .unwrap_or_else(|| format!("User {}", user_id))
 }
