@@ -238,7 +238,7 @@ async fn handle_hug(bot: teloxide::Bot, msg: Message) -> ResponseResult<()> {
         "◝(ᵔᗜᵔ)◜",
         "(૭ ｡•̀ ᵕ •́｡ )૭",
         "(⊙ _ ⊙ )",
-        "(◍•ᴗ•◍)❤",
+        "(◍•ᴗ•◍)♡",
         "≽^•⩊•^≼",
         "ᕙ(  •̀ ᗜ •́  )ᕗ",
         "( ⊃ ◕ _ ◕)⊃",
@@ -252,10 +252,7 @@ async fn handle_hug(bot: teloxide::Bot, msg: Message) -> ResponseResult<()> {
     let index = rng.gen_range(0..HUG_MESSAGES.len());
     let text = HUG_MESSAGES[index];
 
-    bot.send_message(msg.chat.id, text)
-        // MarkdownV2 for bold/italic text
-        .parse_mode(teloxide::types::ParseMode::MarkdownV2)
-        .await?;
+    bot.send_message(msg.chat.id, text).await?;
 
     Ok(())
 }
