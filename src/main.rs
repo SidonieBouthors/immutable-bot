@@ -8,6 +8,7 @@ use teloxide::{prelude::*, utils::command::BotCommands};
 #[derive(Clone)]
 struct Bot {
     db: SqlitePool,
+    admin_id: UserId,
 }
 
 #[derive(BotCommands, Clone)]
@@ -21,6 +22,10 @@ enum Command {
     GuessWho,
     #[command(description = "Send a group hug to everyone!")]
     Hug,
+    #[command(description = "Admin: Authorize this chat for bot use")]
+    Authorize,
+    #[command(description = "Admin: Deauthorize this chat")]
+    Deauthorize,
 }
 
 #[derive(sqlx::FromRow)]
@@ -33,12 +38,27 @@ struct Quote {
     message_date: DateTime<Utc>,
 }
 
+#[derive(Debug)]
+struct SqlxRequestError(sqlx::Error);
+impl From<SqlxRequestError> for teloxide::RequestError {
+    fn from(error: SqlxRequestError) -> Self {
+        teloxide::RequestError::Io(std::io::Error::other(error.0.to_string()))
+    }
+}
+
 #[tokio::main]
 async fn main() {
     dotenv::dotenv().ok();
 
     pretty_env_logger::init();
     log::info!("Starting Immutable Bot...");
+
+    // Get Admin ID from environment variable
+    let admin_id_str = std::env::var("ADMIN_ID")
+        .expect("ADMIN_ID env variable not set. Please set the bot owner's Telegram User ID.");
+    let admin_id: UserId = UserId(admin_id_str.parse::<u64>().unwrap_or_else(|_| {
+        panic!("Failed to parse ADMIN_ID as a positive integer.");
+    }));
 
     // Initialize database
     let db = SqlitePool::connect("sqlite:data/quotes.db?mode=rwc")
@@ -62,8 +82,20 @@ async fn main() {
     .await
     .expect("Failed to create table");
 
+    // Create authorized_chats table
+    sqlx::query(
+        r#"
+    CREATE TABLE IF NOT EXISTS authorized_chats (
+        chat_id INTEGER PRIMARY KEY
+    )
+    "#,
+    )
+    .execute(&db)
+    .await
+    .expect("Failed to create authorized_chats table");
+
     let bot = teloxide::Bot::from_env();
-    let bot_state = Bot { db };
+    let bot_state = Bot { db, admin_id };
 
     log::info!("Bot started successfully!");
 
@@ -78,7 +110,27 @@ async fn main() {
     .await;
 }
 
+async fn is_chat_authorized(db: &SqlitePool, chat_id: ChatId) -> bool {
+    sqlx::query("SELECT 1 FROM authorized_chats WHERE chat_id = ?")
+        .bind(chat_id.0)
+        .fetch_optional(db)
+        .await
+        .map(|r| r.is_some())
+        .unwrap_or(false)
+}
+
 async fn answer(bot: teloxide::Bot, msg: Message, cmd: Command, state: Bot) -> ResponseResult<()> {
+    let requires_auth = !matches!(cmd, Command::Authorize | Command::Deauthorize);
+
+    if requires_auth && !is_chat_authorized(&state.db, msg.chat.id).await {
+        bot.send_message(
+            msg.chat.id,
+            "❌ This chat is not authorized to talk to me (╭ರ_•́)",
+        )
+        .await?;
+        return Ok(());
+    }
+
     match cmd {
         Command::Help => {
             bot.send_message(msg.chat.id, Command::descriptions().to_string())
@@ -88,6 +140,8 @@ async fn answer(bot: teloxide::Bot, msg: Message, cmd: Command, state: Bot) -> R
         Command::Quote => handle_quote(bot, msg, state).await,
         Command::GuessWho => handle_guesswho(bot, msg, state).await,
         Command::Hug => handle_hug(bot, msg).await,
+        Command::Authorize => handle_authorize(bot, msg, state).await,
+        Command::Deauthorize => handle_deauthorize(bot, msg, state).await,
     }
 }
 
@@ -124,18 +178,18 @@ async fn handle_quote(bot: teloxide::Bot, msg: Message, state: Bot) -> ResponseR
                 }
                 Err(e) => {
                     log::error!("Database error: {}", e);
-                    bot.send_message(msg.chat.id, "❌ Failed to save quote")
+                    bot.send_message(msg.chat.id, "❌ Failed to save quote (⊙ _ ⊙ )")
                         .await?;
                 }
             }
         } else {
-            bot.send_message(msg.chat.id, "⚠️ Can only save text messages")
+            bot.send_message(msg.chat.id, "⚠️ Can only save text messages (ᵕ—ᴗ—)")
                 .await?;
         }
     } else {
         bot.send_message(
             msg.chat.id,
-            "⚠️ Please reply to a message with /quote to save it",
+            "⚠️ Please reply to a message with /quote to save it ꉂ(˵˃ ᗜ ˂˵)",
         )
         .await?;
     }
@@ -145,7 +199,7 @@ async fn handle_quote(bot: teloxide::Bot, msg: Message, state: Bot) -> ResponseR
 
 async fn handle_guesswho(bot: teloxide::Bot, msg: Message, state: Bot) -> ResponseResult<()> {
     let chat_id = msg.chat.id.0;
-    
+
     // Get all unique users who have quotes
     let users: Vec<(i64, Option<String>)> =
         sqlx::query_as("SELECT DISTINCT user_id, username FROM quotes WHERE chat_id = ?")
@@ -157,7 +211,7 @@ async fn handle_guesswho(bot: teloxide::Bot, msg: Message, state: Bot) -> Respon
     if users.len() < 2 {
         bot.send_message(
             msg.chat.id,
-            "⚠️ Need at least 2 different people with saved quotes to play!",
+            "⚠️ Need at least 2 people with saved quotes to play! ٩( ᐖ )人( ᐛ )و",
         )
         .await?;
         return Ok(());
@@ -165,7 +219,7 @@ async fn handle_guesswho(bot: teloxide::Bot, msg: Message, state: Bot) -> Respon
 
     // Get a random quote
     let quote: Option<Quote> = sqlx::query_as(
-        "SELECT id, user_id, username, message_text, message_date FROM quotes WHERE chat_id = ? ORDER BY RANDOM() LIMIT 1",
+        "SELECT id, chat_id, user_id, username, message_text, message_date FROM quotes WHERE chat_id = ? ORDER BY RANDOM() LIMIT 1",
     )
     .bind(chat_id)
     .fetch_optional(&state.db)
@@ -224,7 +278,7 @@ async fn handle_guesswho(bot: teloxide::Bot, msg: Message, state: Bot) -> Respon
     // Send the poll
     bot.send_poll(
         msg.chat.id,
-        format!("Who said this?\n\"{}\"", quote.message_text),
+        format!("Who said this? (≖_≖)\n\"{}\"", quote.message_text),
         options,
     )
     .is_anonymous(false)
@@ -269,4 +323,86 @@ fn format_user_display(user_id: i64, username: Option<&str>) -> String {
     username
         .map(|u| format!("@{}", u))
         .unwrap_or_else(|| format!("User {}", user_id))
+}
+
+async fn check_admin(bot: &teloxide::Bot, msg: &Message, state: &Bot) -> bool {
+    let user_id = msg.from().map(|u| u.id).unwrap_or(UserId(0));
+    if user_id != state.admin_id {
+        bot.send_message(
+            msg.chat.id,
+            "❌ This command can only be used by the bot admin ᕦ(ò_óˇ)ᕤ",
+        )
+        .await
+        .log_on_error()
+        .await;
+        return false;
+    }
+    true
+}
+
+async fn handle_authorize(bot: teloxide::Bot, msg: Message, state: Bot) -> ResponseResult<()> {
+    if !check_admin(&bot, &msg, &state).await {
+        return Ok(());
+    }
+
+    let chat_id = msg.chat.id.0;
+
+    let is_authorized = is_chat_authorized(&state.db, msg.chat.id).await;
+
+    if is_authorized {
+        bot.send_message(
+            msg.chat.id,
+            "⚠️ This chat is already authorized (っ º - º ς)",
+        )
+        .await?;
+    } else {
+        // Authorize
+        sqlx::query("INSERT INTO authorized_chats (chat_id) VALUES (?)")
+            .bind(chat_id)
+            .execute(&state.db)
+            .await
+            .map_err(SqlxRequestError)?;
+
+        bot.send_message(
+            msg.chat.id,
+            "✅ Chat authorized! ImmutableBot is now your buddy ദ്ദി ˉ͈̀꒳ˉ͈́ )✧".to_string(),
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+async fn handle_deauthorize(bot: teloxide::Bot, msg: Message, state: Bot) -> ResponseResult<()> {
+    if !check_admin(&bot, &msg, &state).await {
+        return Ok(());
+    }
+
+    let chat_id = msg.chat.id.0;
+
+    // Check if authorized
+    let is_authorized = is_chat_authorized(&state.db, msg.chat.id).await;
+
+    if !is_authorized {
+        bot.send_message(
+            msg.chat.id,
+            "⚠️ This chat is not currently authorized (  •̀ω  •́  )",
+        )
+        .await?;
+    } else {
+        // De-authorize
+        sqlx::query("DELETE FROM authorized_chats WHERE chat_id = ?")
+            .bind(chat_id)
+            .execute(&state.db)
+            .await
+            .map_err(SqlxRequestError)?;
+
+        bot.send_message(
+            msg.chat.id,
+            "⛔ Chat de-authorized! ImmutableBot will no longer respond here (っ◞‸◟ c)".to_string(),
+        )
+        .await?;
+    }
+
+    Ok(())
 }
