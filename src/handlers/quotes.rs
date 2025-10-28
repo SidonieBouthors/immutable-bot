@@ -3,7 +3,7 @@ use rand::{SeedableRng, seq::SliceRandom};
 use teloxide::{
     payloads::SendPollSetters,
     prelude::{Requester, ResponseResult},
-    types::Message,
+    types::{ForwardedFrom, Message},
 };
 
 use crate::{BotState, db::Quote, utils::format_user_display};
@@ -11,10 +11,20 @@ use crate::{BotState, db::Quote, utils::format_user_display};
 pub async fn handle_quote(bot: teloxide::Bot, msg: Message, state: BotState) -> ResponseResult<()> {
     if let Some(replied_msg) = msg.reply_to_message() {
         if let Some(text) = replied_msg.text() {
-            let user_id = replied_msg.from().map(|u| u.id.0 as i64).unwrap_or(0);
-            let username = replied_msg.from().and_then(|u| u.username.clone());
+            let (user_id, username);
             let original_date = replied_msg.date;
             let chat_id = msg.chat.id.0;
+
+            match msg.forward_from() {
+                Some(ForwardedFrom::User(u)) => {
+                    user_id = u.id.0 as i64;
+                    username = u.username.clone();
+                }
+                _ => {
+                    user_id = replied_msg.from().map(|u| u.id.0 as i64).unwrap_or(0);
+                    username = replied_msg.from().and_then(|u| u.username.clone());
+                }
+            };
 
             let result = sqlx::query(
                 "INSERT INTO quotes (chat_id, user_id, username, message_text, message_date) VALUES (?, ?, ?, ?, ?)",
