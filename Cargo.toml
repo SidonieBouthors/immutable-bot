@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 teloxide = { version = "0.12", features = ["macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-sqlx = { version = "0.7", features = [
+sqlx = { version = "0.8", features = [
   "runtime-tokio-native-tls",
   "sqlite",
   "chrono",
