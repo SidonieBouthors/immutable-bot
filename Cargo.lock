@@ -932,6 +932,7 @@ dependencies = [
  "sqlx",
  "teloxide",
  "tokio",
+ "url",
 ]
 
 [[package]]
