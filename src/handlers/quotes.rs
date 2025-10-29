@@ -3,7 +3,7 @@ use rand::{SeedableRng, seq::SliceRandom};
 use teloxide::{
     payloads::SendPollSetters,
     prelude::{Requester, ResponseResult},
-    types::{ForwardedFrom, Message},
+    types::{InputPollOption, Message, MessageOrigin},
 };
 
 use crate::{BotState, db::Quote, utils::format_user_display};
@@ -28,14 +28,25 @@ pub async fn handle_quote(bot: teloxide::Bot, msg: Message, state: BotState) -> 
     let original_date = replied_msg.date;
     let chat_id = msg.chat.id.0;
 
-    match msg.forward_from() {
-        Some(ForwardedFrom::User(u)) => {
-            user_id = u.id.0 as i64;
-            username = u.username.clone();
+    match replied_msg.forward_origin() {
+        Some(MessageOrigin::User {
+            date: _,
+            sender_user,
+        }) => {
+            user_id = sender_user.id.0 as i64;
+            username = sender_user.username.clone();
+        }
+        Some(MessageOrigin::HiddenUser {
+            date: _,
+            sender_user_name,
+        }) => {
+            // Message was forwarded from a user with hidden forwarding settings
+            user_id = 0;
+            username = Some(sender_user_name.to_string());
         }
         _ => {
-            user_id = replied_msg.from().map(|u| u.id.0 as i64).unwrap_or(0);
-            username = replied_msg.from().and_then(|u| u.username.clone());
+            user_id = replied_msg.from.clone().map(|u| u.id.0 as i64).unwrap_or(0);
+            username = replied_msg.from.clone().and_then(|u| u.username);
         }
     };
 
@@ -120,14 +131,14 @@ pub async fn handle_guesswho(
     let mut options = vec![correct_answer.clone()];
     let mut rng = rand::rngs::StdRng::from_entropy();
 
-    // Add up to 3 other random users as options
+    // Add up to 9 other random users as options (10 options is the max)
     let other_users: Vec<String> = users
         .iter()
         .filter(|(id, _)| *id != quote.user_id)
         .map(|(id, username)| format_user_display(*id, username.as_deref()))
         .collect();
 
-    let num_options = std::cmp::min(3, other_users.len());
+    let num_options = std::cmp::min(9, other_users.len());
     let mut selected_others: Vec<String> = other_users
         .choose_multiple(&mut rng, num_options)
         .cloned()
@@ -154,11 +165,14 @@ pub async fn handle_guesswho(
     let local_datetime = quote.message_date.with_timezone(&target_tz);
     let formatted_date = local_datetime.format("%b %d, %Y at %I:%M %p").to_string();
 
+    let poll_options: Vec<InputPollOption> =
+        options.into_iter().map(InputPollOption::new).collect();
+
     // Send the poll
     bot.send_poll(
         msg.chat.id,
         format!("Who said this? (≖_≖)\n\"{}\"", quote.message_text),
-        options,
+        poll_options,
     )
     .is_anonymous(false)
     .type_(teloxide::types::PollType::Quiz)

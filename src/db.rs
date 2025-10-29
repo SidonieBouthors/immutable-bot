@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use chrono::Utc;
 use sqlx::sqlite::SqlitePool;
 use teloxide::{RequestError, types::ChatId};
@@ -6,7 +8,7 @@ use teloxide::{RequestError, types::ChatId};
 pub struct SqliteRequestError(pub sqlx::Error);
 impl From<SqliteRequestError> for RequestError {
     fn from(error: SqliteRequestError) -> Self {
-        RequestError::Io(std::io::Error::other(error.0.to_string()))
+        RequestError::Io(Arc::new(std::io::Error::other(error.0.to_string())))
     }
 }
 

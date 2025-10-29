@@ -1,6 +1,6 @@
 use teloxide::{
-    payloads::SendMessageSetters,
     prelude::{Requester, ResponseResult},
+    sugar::request::{RequestLinkPreviewExt, RequestReplyExt},
     types::{Message, MessageEntityKind},
 };
 use url::{Url, form_urlencoded};
@@ -33,8 +33,8 @@ pub async fn handle_link_rewrite(bot: teloxide::Bot, msg: Message) -> ResponseRe
                     msg.chat.id,
                     format!("🔗 Better Link:\n{}", sanitized_link.trim()),
                 )
-                .reply_to_message_id(msg.id)
-                .disable_web_page_preview(false)
+                .reply_to(msg.id)
+                .disable_link_preview(false)
                 .await?;
             }
         }
