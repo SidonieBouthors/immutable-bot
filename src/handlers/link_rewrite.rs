@@ -73,13 +73,13 @@ fn sanitize_link(original_link: &str) -> Option<String> {
         // X/Twitter
         "x.com" | "twitter.com" => Some("fxtwitter.com"),
         // Instagram
-        "instagram.com" | "www.instagram.com" => Some("kkinstagram.com"),
+        "instagram.com" | "www.instagram.com" => Some("eeinstagram.com"),
         // Reddit
         "reddit.com" | "www.reddit.com" | "redd.it" => Some("rxddit.com"),
         // Bluesky
         "bsky.app" | "www.bsky.app" => Some("fxbsky.app"),
         // TikTok
-        "tiktok.com" | "www.tiktok.com" | "vm.tiktok.com" => Some("tfxktok.com"),
+        "tiktok.com" | "www.tiktok.com" | "vm.tiktok.com" => Some("tiktokez.com"),
         _ => None,
     };
     if let Some(h) = new_host {
