@@ -14,19 +14,20 @@ pub async fn handle_link_rewrite(bot: teloxide::Bot, msg: Message) -> ResponseRe
 
     if let Some(entities) = msg.entities() {
         for entity in entities {
-            let original_url_str = match &entity.kind {
+            let original_url = match &entity.kind {
                 // Plain URL
                 MessageEntityKind::Url => text
-                    .get(entity.offset..entity.offset + entity.length)
-                    .map(|s| s.to_string()),
+                    .chars()
+                    .skip(entity.offset)
+                    .take(entity.length)
+                    .collect(),
 
                 // Hyperlink
-                MessageEntityKind::TextLink { url } => Some(url.to_string()),
+                MessageEntityKind::TextLink { url } => url.to_string(),
                 _ => continue,
             };
 
-            if let Some(original_url) = original_url_str
-                && let Some(sanitized_link) = sanitize_link(&original_url)
+            if let Some(sanitized_link) = sanitize_link(&original_url)
                 && sanitized_link != original_url
             {
                 bot.send_message(
