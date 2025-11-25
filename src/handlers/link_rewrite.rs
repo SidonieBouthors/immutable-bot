@@ -1,3 +1,4 @@
+use log::warn;
 use teloxide::{
     prelude::{Requester, ResponseResult},
     sugar::request::{RequestLinkPreviewExt, RequestReplyExt},
@@ -16,11 +17,21 @@ pub async fn handle_link_rewrite(bot: teloxide::Bot, msg: Message) -> ResponseRe
         for entity in entities {
             let original_url = match &entity.kind {
                 // Plain URL
-                MessageEntityKind::Url => text
-                    .chars()
-                    .skip(entity.offset)
-                    .take(entity.length)
-                    .collect(),
+                MessageEntityKind::Url => {
+                    let utf16 = text
+                        .encode_utf16()
+                        .skip(entity.offset)
+                        .take(entity.length)
+                        .collect::<Vec<_>>();
+
+                    match String::from_utf16(&utf16) {
+                        Ok(url) => url,
+                        Err(e) => {
+                            warn!(r#"Unable to convert link from "{text}" to UTF-16 string: {e}"#);
+                            continue;
+                        }
+                    }
+                }
 
                 // Hyperlink
                 MessageEntityKind::TextLink { url } => url.to_string(),
