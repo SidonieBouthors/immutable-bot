@@ -85,7 +85,7 @@ fn sanitize_link(original_link: &str) -> Option<String> {
         // X/Twitter
         "x.com" | "twitter.com" => Some("fxtwitter.com"),
         // Instagram
-        "instagram.com" | "www.instagram.com" => Some("eeinstagram.com"),
+        "instagram.com" | "www.instagram.com" => Some("kkclip.com"),
         // Reddit
         "reddit.com" | "www.reddit.com" | "redd.it" => Some("rxddit.com"),
         // Bluesky
