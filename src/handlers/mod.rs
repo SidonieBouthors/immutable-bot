@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod banned_words;
 pub mod hug;
 pub mod link_rewrite;
 pub mod quotes;
@@ -7,7 +8,8 @@ use teloxide::{prelude::*, types::Message, utils::command::BotCommands};
 
 use crate::{BotState, db::is_chat_authorized};
 
-use admin::{handle_authorize, handle_deauthorize};
+use admin::{handle_authorize, handle_deauthorize, handle_set_threshold};
+use banned_words::{handle_propose_ban, handle_propose_unban};
 use hug::handle_hug;
 use quotes::{handle_guesswho, handle_quote};
 
@@ -22,10 +24,16 @@ pub enum Command {
     GuessWho,
     #[command(description = "Send a group hug to everyone!")]
     Hug,
+    #[command(description = "Propose banning a word (needs votes)")]
+    BanWord(String),
+    #[command(description = "Propose unbanning a word (needs votes)")]
+    UnbanWord(String),
     #[command(description = "Admin: Authorize this chat for bot use")]
     Authorize,
     #[command(description = "Admin: Deauthorize this chat")]
     Deauthorize,
+    #[command(description = "Admin: Set votes needed to ban / unban a word (number or 'default')")]
+    SetThreshold(String),
 }
 
 pub async fn answer(
@@ -54,7 +62,10 @@ pub async fn answer(
         Command::Quote => handle_quote(bot, msg, state).await,
         Command::GuessWho => handle_guesswho(bot, msg, state).await,
         Command::Hug => handle_hug(bot, msg).await,
+        Command::BanWord(word) => handle_propose_ban(bot, msg, state, word).await,
+        Command::UnbanWord(word) => handle_propose_unban(bot, msg, state, word).await,
         Command::Authorize => handle_authorize(bot, msg, state).await,
         Command::Deauthorize => handle_deauthorize(bot, msg, state).await,
+        Command::SetThreshold(arg) => handle_set_threshold(bot, msg, state, arg).await,
     }
 }
