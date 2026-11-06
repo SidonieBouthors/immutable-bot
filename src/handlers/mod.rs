@@ -25,9 +25,9 @@ pub enum Command {
     #[command(description = "Send a group hug to everyone!")]
     Hug,
     #[command(description = "Propose banning a word (needs votes)")]
-    BanWord(String),
+    Ban(String),
     #[command(description = "Propose unbanning a word (needs votes)")]
-    UnbanWord(String),
+    Unban(String),
     #[command(description = "Admin: Authorize this chat for bot use")]
     Authorize,
     #[command(description = "Admin: Deauthorize this chat")]
@@ -62,8 +62,8 @@ pub async fn answer(
         Command::Quote => handle_quote(bot, msg, state).await,
         Command::GuessWho => handle_guesswho(bot, msg, state).await,
         Command::Hug => handle_hug(bot, msg).await,
-        Command::BanWord(word) => handle_propose_ban(bot, msg, state, word).await,
-        Command::UnbanWord(word) => handle_propose_unban(bot, msg, state, word).await,
+        Command::Ban(word) => handle_propose_ban(bot, msg, state, word).await,
+        Command::Unban(word) => handle_propose_unban(bot, msg, state, word).await,
         Command::Authorize => handle_authorize(bot, msg, state).await,
         Command::Deauthorize => handle_deauthorize(bot, msg, state).await,
         Command::SetThreshold(arg) => handle_set_threshold(bot, msg, state, arg).await,
