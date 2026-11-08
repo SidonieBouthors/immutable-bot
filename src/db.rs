@@ -133,6 +133,29 @@ pub async fn create_tables(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(db)
     .await?;
 
+    // Details for votes about removing quotes
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS quote_vote_details (
+            msg_id INTEGER NOT NULL,
+            chat_id INTEGER NOT NULL,
+            quote_text TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
+            PRIMARY KEY (msg_id, chat_id)
+        )
+        "#,
+    )
+    .execute(db)
+    .await?;
+
+    // At most one open vote per quote per chat
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_quote_vote_details_open
+         ON quote_vote_details (chat_id, quote_text, user_id)",
+    )
+    .execute(db)
+    .await?;
+
     Ok(())
 }
 
@@ -214,12 +237,14 @@ impl WordAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VoteSubject {
     Word { word: String, action: WordAction },
+    Quote { text: String, user_id: i64 },
 }
 
 impl VoteSubject {
     fn kind(&self) -> &'static str {
         match self {
             VoteSubject::Word { .. } => "word",
+            VoteSubject::Quote { .. } => "quote",
         }
     }
 }
@@ -237,6 +262,17 @@ pub async fn has_open_vote(
                 .bind(word)
                 .fetch_optional(db)
                 .await?
+        }
+        VoteSubject::Quote { text, user_id } => {
+            sqlx::query_as(
+                "SELECT 1 FROM quote_vote_details
+                 WHERE chat_id = ? AND quote_text = ? AND user_id = ?",
+            )
+            .bind(chat_id)
+            .bind(text)
+            .bind(user_id)
+            .fetch_optional(db)
+            .await?
         }
     };
     Ok(row.is_some())
@@ -270,6 +306,18 @@ pub async fn create_vote(
             .bind(chat_id)
             .bind(word)
             .bind(action.as_str())
+            .execute(&mut *tx)
+            .await?;
+        }
+        VoteSubject::Quote { text, user_id } => {
+            sqlx::query(
+                "INSERT INTO quote_vote_details (msg_id, chat_id, quote_text, user_id)
+                 VALUES (?, ?, ?, ?)",
+            )
+            .bind(msg_id)
+            .bind(chat_id)
+            .bind(text)
+            .bind(user_id)
             .execute(&mut *tx)
             .await?;
         }
@@ -378,6 +426,27 @@ pub async fn finalize_vote(
 
             VoteSubject::Word { word, action }
         }
+        "quote" => {
+            let (text, user_id): (String, i64) = sqlx::query_as(
+                "DELETE FROM quote_vote_details WHERE msg_id = ? AND chat_id = ?
+                 RETURNING quote_text, user_id",
+            )
+            .bind(msg_id)
+            .bind(chat_id)
+            .fetch_one(&mut *tx)
+            .await?;
+
+            sqlx::query(
+                "DELETE FROM quotes WHERE chat_id = ? AND message_text = ? AND user_id = ?",
+            )
+            .bind(chat_id)
+            .bind(&text)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+
+            VoteSubject::Quote { text, user_id }
+        }
         other => {
             return Err(sqlx::Error::Decode(
                 format!("unknown vote kind: {other}").into(),
@@ -473,6 +542,69 @@ mod tests {
         create_vote(&db, 10, 1, 100, 2, &subject).await.unwrap();
         assert!(create_vote(&db, 11, 1, 101, 2, &subject).await.is_err());
         // the failed attempt left nothing behind
+        assert_eq!(get_required_votes(&db, 11, 1).await, None);
+    }
+
+    fn quote_subject(text: &str, user_id: i64) -> VoteSubject {
+        VoteSubject::Quote {
+            text: text.into(),
+            user_id,
+        }
+    }
+
+    async fn add_quote(db: &SqlitePool, chat_id: i64, user_id: i64, text: &str) {
+        sqlx::query(
+            "INSERT INTO quotes (chat_id, user_id, username, message_text) VALUES (?, ?, 'x', ?)",
+        )
+        .bind(chat_id)
+        .bind(user_id)
+        .bind(text)
+        .execute(db)
+        .await
+        .unwrap();
+    }
+
+    async fn quote_count(db: &SqlitePool) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM quotes")
+            .fetch_one(db)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn passed_quote_vote_removes_only_matching_quotes() {
+        let db = test_db().await;
+        add_quote(&db, 1, 7, "lol").await; // target
+        add_quote(&db, 1, 7, "lol").await; // duplicate by same author: also removed
+        add_quote(&db, 1, 8, "lol").await; // same text, other author: kept
+        add_quote(&db, 2, 7, "lol").await; // other chat: kept
+        add_quote(&db, 1, 7, "other").await; // other text: kept
+
+        let subject = quote_subject("lol", 7);
+        create_vote(&db, 10, 1, 100, 2, &subject).await.unwrap();
+        assert_eq!(quote_count(&db).await, 5); // nothing deleted before it passes
+
+        assert_eq!(finalize_vote(&db, 10, 1).await.unwrap(), Some(subject));
+        assert_eq!(quote_count(&db).await, 3);
+        assert_eq!(finalize_vote(&db, 10, 1).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn second_open_vote_for_same_quote_is_rejected() {
+        let db = test_db().await;
+        let subject = quote_subject("lol", 7);
+        create_vote(&db, 10, 1, 100, 2, &subject).await.unwrap();
+
+        assert!(has_open_vote(&db, 1, &subject).await.unwrap());
+        // same text with a different author is a different quote
+        assert!(
+            !has_open_vote(&db, 1, &quote_subject("lol", 8))
+                .await
+                .unwrap()
+        );
+
+        assert!(create_vote(&db, 11, 1, 101, 2, &subject).await.is_err());
+        // rejected attempt leaves nothing behind
         assert_eq!(get_required_votes(&db, 11, 1).await, None);
     }
 }

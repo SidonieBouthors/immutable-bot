@@ -300,6 +300,7 @@ pub async fn handle_word_vote_callback(
                     )
                     .await;
             }
+            Ok(Some(_)) => {} // TODO: remove when voting is extracted
             Ok(None) => {
                 bot.answer_callback_query(q.id)
                     .text("⚠️ This vote is no longer active")
@@ -351,6 +352,7 @@ pub async fn handle_word_vote_callback(
                                 )
                                 .await;
                         }
+                        Ok(Some(_)) => {} // TODO: remove when voting is extracted
                         Ok(None) => {
                             // Someone else closed it a moment ago
                             bot.answer_callback_query(q.id)
