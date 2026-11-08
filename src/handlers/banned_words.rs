@@ -1,9 +1,11 @@
+use crate::{
+    BotState,
+    db::{self, VoteSubject, WordAction},
+};
 use teloxide::{
     prelude::*,
     types::{InlineKeyboardButton, InlineKeyboardMarkup, Message, ReactionType},
 };
-
-use crate::{BotState, db};
 
 /// Normalizer: collapse whitespace to a single space, trim, lowercase
 fn normalize(s: &str) -> String {
@@ -79,24 +81,10 @@ fn create_vote_keyboard(current_votes: i64, target_votes: i64) -> InlineKeyboard
     ]])
 }
 
-enum ProposalAction {
-    Ban,
-    Unban,
-}
-
-impl ProposalAction {
-    fn as_str(&self) -> &'static str {
-        match self {
-            ProposalAction::Ban => "ban",
-            ProposalAction::Unban => "unban",
-        }
-    }
-
-    fn display_name(&self) -> &'static str {
-        match self {
-            ProposalAction::Ban => "Ban word",
-            ProposalAction::Unban => "Unban word",
-        }
+fn display_name(action: WordAction) -> &'static str {
+    match action {
+        WordAction::Ban => "Ban word",
+        WordAction::Unban => "Unban word",
     }
 }
 
@@ -105,7 +93,7 @@ async fn propose_word_action(
     msg: Message,
     state: BotState,
     word_arg: String,
-    action: ProposalAction,
+    action: WordAction,
 ) -> ResponseResult<()> {
     let word = normalize(&word_arg);
     if word.is_empty() || word.chars().count() > 50 {
@@ -132,7 +120,7 @@ async fn propose_word_action(
         let is_banned = map.get(&chat_id).is_some_and(|set| set.contains(&word));
 
         match action {
-            ProposalAction::Ban if is_banned => {
+            WordAction::Ban if is_banned => {
                 bot.send_message(
                     msg.chat.id,
                     format!("⚠️ \"{}\" is already banned in this chat!  (￣ヘ￣)", word),
@@ -140,7 +128,7 @@ async fn propose_word_action(
                 .await?;
                 return Ok(());
             }
-            ProposalAction::Unban if !is_banned => {
+            WordAction::Unban if !is_banned => {
                 bot.send_message(
                     msg.chat.id,
                     format!("⚠️ \"{}\" is not in the banned words list! (•̀⤙•́ )", word),
@@ -152,8 +140,13 @@ async fn propose_word_action(
         }
     }
 
+    let subject = VoteSubject::Word {
+        word: word.clone(),
+        action,
+    };
+
     // Check if there's already an open proposal for this word
-    match db::has_open_proposal(&state.db, chat_id, &word).await {
+    match db::has_open_vote(&state.db, chat_id, &subject).await {
         Ok(true) => {
             bot.send_message(
                 msg.chat.id,
@@ -167,7 +160,7 @@ async fn propose_word_action(
         }
         Ok(false) => {}
         Err(e) => {
-            log::error!("has_open_proposal failed: {e}");
+            log::error!("has_open_vote failed: {e}");
             bot.send_message(msg.chat.id, "⚠️ Something went wrong, try again")
                 .await?;
             return Ok(());
@@ -188,24 +181,23 @@ async fn propose_word_action(
     let sent = bot
         .send_message(
             msg.chat.id,
-            format!("(人´꒳`*) Proposal: {} \"{}\"", action.display_name(), word),
+            format!("(人´꒳`*) Proposal: {} \"{}\"", display_name(action), word),
         )
         .reply_markup(keyboard)
         .await?;
 
     // Create a vote session in the database
-    if let Err(e) = db::create_vote_session(
+    if let Err(e) = db::create_vote(
         &state.db,
         sent.id.0 as i64,
         chat_id,
-        &word,
-        action.as_str(),
         proposer_id,
         target,
+        &subject,
     )
     .await
     {
-        log::error!("create_vote_session failed: {e}");
+        log::error!("create_vote failed: {e}");
         let _ = bot
             .edit_message_text(
                 msg.chat.id,
@@ -218,17 +210,18 @@ async fn propose_word_action(
 
     // The proposer's vote alone may already be enough
     if target <= 1
-        && let Ok(Some((word, action))) =
-            db::finalize_proposal(&state.db, sent.id.0 as i64, chat_id).await
+        && let Ok(Some(VoteSubject::Word { word, action })) =
+            db::finalize_vote(&state.db, sent.id.0 as i64, chat_id).await
     {
-        update_cache(&state, chat_id, &word, &action).await;
+        update_cache(&state, chat_id, &word, action).await;
         let _ = bot
             .edit_message_text(
                 msg.chat.id,
                 sent.id,
                 format!(
                     "🎉 Proposal Passed! (1/1)\n\"{}\" has been {}ned.",
-                    word, action
+                    word,
+                    action.as_str()
                 ),
             )
             .await;
@@ -243,7 +236,7 @@ pub async fn handle_propose_ban(
     state: BotState,
     word: String,
 ) -> ResponseResult<()> {
-    propose_word_action(bot, msg, state, word, ProposalAction::Ban).await
+    propose_word_action(bot, msg, state, word, WordAction::Ban).await
 }
 
 pub async fn handle_propose_unban(
@@ -252,7 +245,7 @@ pub async fn handle_propose_unban(
     state: BotState,
     word: String,
 ) -> ResponseResult<()> {
-    propose_word_action(bot, msg, state, word, ProposalAction::Unban).await
+    propose_word_action(bot, msg, state, word, WordAction::Unban).await
 }
 
 /// Handles button presses for active proposals
@@ -272,18 +265,7 @@ pub async fn handle_word_vote_callback(
     let msg_id = msg.id().0 as i64;
     let user_id = q.from.id.0 as i64;
 
-    let required: Option<(i64,)> =
-        sqlx::query_as("SELECT required FROM word_votes WHERE msg_id = ? AND chat_id = ?")
-            .bind(msg_id)
-            .bind(chat_id)
-            .fetch_optional(&state.db)
-            .await
-            .unwrap_or_else(|e| {
-                log::error!("proposal lookup failed: {e}");
-                None
-            });
-
-    let Some((target,)) = required else {
+    let Some(target) = db::get_required_votes(&state.db, msg_id, chat_id).await else {
         bot.answer_callback_query(q.id)
             .text("⚠️ This vote is no longer active ╮(￣▿￣)╭")
             .await?;
@@ -300,9 +282,9 @@ pub async fn handle_word_vote_callback(
             return Ok(());
         }
 
-        match db::finalize_proposal(&state.db, msg_id, chat_id).await {
-            Ok(Some((word, action))) => {
-                update_cache(&state, chat_id, &word, &action).await;
+        match db::finalize_vote(&state.db, msg_id, chat_id).await {
+            Ok(Some(VoteSubject::Word { word, action })) => {
+                update_cache(&state, chat_id, &word, action).await;
                 bot.answer_callback_query(q.id)
                     .text("✅ Admin approved!")
                     .await?;
@@ -312,7 +294,8 @@ pub async fn handle_word_vote_callback(
                         msg.id(),
                         format!(
                             "Proposal Approved by Admin! ✧٩(ˊᗜˋ*)و✧\n\"{}\" has been {}ned.",
-                            word, action
+                            word,
+                            action.as_str()
                         ),
                     )
                     .await;
@@ -323,7 +306,7 @@ pub async fn handle_word_vote_callback(
                     .await?;
             }
             Err(e) => {
-                log::error!("finalize_proposal failed: {e}");
+                log::error!("finalize_vote failed: {e}");
                 bot.answer_callback_query(q.id)
                     .text("⚠️ Something went wrong, try again")
                     .await?;
@@ -348,9 +331,9 @@ pub async fn handle_word_vote_callback(
             Ok(Some(current_votes)) => {
                 if current_votes >= target {
                     // Threshold met -> try to close the proposal. Only one caller wins.
-                    match db::finalize_proposal(&state.db, msg_id, chat_id).await {
-                        Ok(Some((word, action))) => {
-                            update_cache(&state, chat_id, &word, &action).await;
+                    match db::finalize_vote(&state.db, msg_id, chat_id).await {
+                        Ok(Some(VoteSubject::Word { word, action })) => {
+                            update_cache(&state, chat_id, &word, action).await;
                             bot.answer_callback_query(q.id)
                                 .text("👍 Vote counted!")
                                 .await?;
@@ -360,7 +343,10 @@ pub async fn handle_word_vote_callback(
                                     msg.id(),
                                     format!(
                                         "🎉 Proposal Passed! ({}/{})\n\"{}\" has been {}ned.",
-                                        current_votes, target, word, action
+                                        current_votes,
+                                        target,
+                                        word,
+                                        action.as_str()
                                     ),
                                 )
                                 .await;
@@ -372,7 +358,7 @@ pub async fn handle_word_vote_callback(
                                 .await?;
                         }
                         Err(e) => {
-                            log::error!("finalize_proposal failed: {e}");
+                            log::error!("finalize_vote failed: {e}");
                             bot.answer_callback_query(q.id)
                                 .text("⚠️ Something went wrong, try again")
                                 .await?;
@@ -401,11 +387,16 @@ pub async fn handle_word_vote_callback(
 }
 
 /// Update the in-memory cache. Call only after finalize_proposal succeeded.
-async fn update_cache(state: &BotState, chat_id: i64, word: &str, action: &str) {
+async fn update_cache(state: &BotState, chat_id: i64, word: &str, action: WordAction) {
     let mut map = state.banned_words.write().await;
-    if action == "ban" {
-        map.entry(chat_id).or_default().insert(word.to_string());
-    } else if let Some(set) = map.get_mut(&chat_id) {
-        set.remove(word);
+    match action {
+        WordAction::Ban => {
+            map.entry(chat_id).or_default().insert(word.to_string());
+        }
+        WordAction::Unban => {
+            if let Some(set) = map.get_mut(&chat_id) {
+                set.remove(word);
+            }
+        }
     }
 }
