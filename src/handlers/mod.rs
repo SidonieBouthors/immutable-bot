@@ -3,6 +3,7 @@ pub mod banned_words;
 pub mod hug;
 pub mod link_rewrite;
 pub mod quotes;
+pub mod voting;
 
 use teloxide::{prelude::*, types::Message, utils::command::BotCommands};
 
@@ -11,7 +12,7 @@ use crate::{BotState, db::is_chat_authorized};
 use admin::{handle_authorize, handle_deauthorize, handle_set_threshold};
 use banned_words::{handle_propose_ban, handle_propose_unban};
 use hug::handle_hug;
-use quotes::{handle_guesswho, handle_quote};
+use quotes::{handle_guesswho, handle_quote, handle_yeet};
 
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase", description = "Commands:")]
@@ -22,6 +23,8 @@ pub enum Command {
     Quote,
     #[command(description = "Create a 'guess who said this' poll")]
     GuessWho,
+    #[command(description = "Reply to a quote poll to propose removing that quote")]
+    Yeet,
     #[command(description = "Send a group hug to everyone!")]
     Hug,
     #[command(description = "Propose banning a word (needs votes)")]
@@ -61,6 +64,7 @@ pub async fn answer(
         }
         Command::Quote => handle_quote(bot, msg, state).await,
         Command::GuessWho => handle_guesswho(bot, msg, state).await,
+        Command::Yeet => handle_yeet(bot, msg, state).await,
         Command::Hug => handle_hug(bot, msg).await,
         Command::Ban(word) => handle_propose_ban(bot, msg, state, word).await,
         Command::Unban(word) => handle_propose_unban(bot, msg, state, word).await,

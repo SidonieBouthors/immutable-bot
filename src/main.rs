@@ -81,10 +81,7 @@ async fn main() {
                 .endpoint(handle_link_rewrite),
         )
         // Button presses
-        .branch(
-            Update::filter_callback_query()
-                .endpoint(handlers::banned_words::handle_word_vote_callback),
-        );
+        .branch(Update::filter_callback_query().endpoint(handlers::voting::handle_vote_callback));
 
     Dispatcher::builder(bot, handler)
         .dependencies(dptree::deps![bot_state])

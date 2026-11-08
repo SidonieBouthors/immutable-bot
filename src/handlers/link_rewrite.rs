@@ -4,7 +4,7 @@ use teloxide::{
     sugar::request::{RequestLinkPreviewExt, RequestReplyExt},
     types::{Message, MessageEntityKind},
 };
-use url::{Url, form_urlencoded};
+use url::Url;
 
 pub async fn handle_link_rewrite(bot: teloxide::Bot, msg: Message) -> ResponseResult<()> {
     // Ignore non-text messages

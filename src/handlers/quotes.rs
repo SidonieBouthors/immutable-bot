@@ -6,7 +6,30 @@ use teloxide::{
     types::{InputPollOption, Message, MessageOrigin},
 };
 
-use crate::{BotState, db::Quote, utils::format_user_display};
+use crate::{
+    BotState,
+    db::{Quote, VoteSubject},
+    handlers::voting,
+    utils::format_user_display,
+};
+
+const POLL_PREFIX: &str = "Who said this? (≖_≖)\n";
+const POLL_QUESTION_MAX: usize = 300;
+
+fn max_quote_chars() -> usize {
+    POLL_QUESTION_MAX - POLL_PREFIX.chars().count() - 2 // two surrounding quote marks
+}
+
+fn build_poll_question(quote_text: &str) -> String {
+    format!("{POLL_PREFIX}\"{quote_text}\"")
+}
+
+fn parse_poll_question(question: &str) -> Option<&str> {
+    question
+        .strip_prefix(POLL_PREFIX)?
+        .strip_prefix('"')?
+        .strip_suffix('"')
+}
 
 pub async fn handle_quote(bot: teloxide::Bot, msg: Message, state: BotState) -> ResponseResult<()> {
     let Some(replied_msg) = msg.reply_to_message() else {
@@ -23,6 +46,18 @@ pub async fn handle_quote(bot: teloxide::Bot, msg: Message, state: BotState) -> 
             .await?;
         return Ok(());
     };
+
+    if text.chars().count() > max_quote_chars() {
+        bot.send_message(
+            msg.chat.id,
+            format!(
+                "⚠️ That message is too long to save as a quote (max {} characters) (⊙ _ ⊙ )",
+                max_quote_chars()
+            ),
+        )
+        .await?;
+        return Ok(());
+    }
 
     let (user_id, username);
     let original_date = replied_msg.date;
@@ -171,7 +206,7 @@ pub async fn handle_guesswho(
     // Send the poll
     bot.send_poll(
         msg.chat.id,
-        format!("Who said this? (≖_≖)\n\"{}\"", quote.message_text),
+        build_poll_question(&quote.message_text),
         poll_options,
     )
     .is_anonymous(false)
@@ -181,4 +216,109 @@ pub async fn handle_guesswho(
     .await?;
 
     Ok(())
+}
+
+pub async fn handle_yeet(bot: teloxide::Bot, msg: Message, state: BotState) -> ResponseResult<()> {
+    let Some(replied) = msg.reply_to_message() else {
+        bot.send_message(msg.chat.id, "⚠️ Reply to a quote poll with /yeet")
+            .await?;
+        return Ok(());
+    };
+
+    // Only polls sent by this bot
+    let me = bot.get_me().await?;
+    let from_bot = replied.from.as_ref().is_some_and(|u| u.id == me.id);
+
+    let Some((poll, quote_text)) = replied
+        .poll()
+        .filter(|_| from_bot)
+        .and_then(|p| parse_poll_question(&p.question).map(|t| (p, t)))
+    else {
+        bot.send_message(msg.chat.id, "⚠️ That's not a quote poll (´-ε-｀)")
+            .await?;
+        return Ok(());
+    };
+
+    // Correct option is the quote's author
+    let Some(author_display) = poll
+        .correct_option_id
+        .and_then(|i| poll.options.get(i as usize))
+        .map(|o| o.text.clone())
+    else {
+        bot.send_message(msg.chat.id, "⚠️ Can't tell who that quote is from (ó﹏ò｡)")
+            .await?;
+        return Ok(());
+    };
+
+    let candidates: Vec<Quote> = sqlx::query_as(
+        "SELECT id, chat_id, user_id, username, message_text, message_date
+         FROM quotes WHERE chat_id = ? AND message_text = ?",
+    )
+    .bind(msg.chat.id.0)
+    .bind(quote_text)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_else(|e| {
+        log::error!("yeet lookup failed: {e}");
+        Vec::new()
+    });
+
+    let matches: Vec<&Quote> = candidates
+        .iter()
+        .filter(|q| format_user_display(q.user_id, q.username.as_deref()) == author_display)
+        .collect();
+
+    let Some(first) = matches.first() else {
+        bot.send_message(msg.chat.id, "⚠️ That quote is already gone (⇀‸↼‶)")
+            .await?;
+        return Ok(());
+    };
+
+    let subject = VoteSubject::Quote {
+        text: quote_text.to_string(),
+        user_id: first.user_id,
+    };
+    let title = format!("Remove this quote by {author_display}?\n\"{quote_text}\"");
+
+    voting::open_vote(&bot, &msg, &state, subject, title).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn round_trips_plain_text() {
+        let q = build_poll_question("hello there");
+        assert_eq!(parse_poll_question(&q), Some("hello there"));
+    }
+
+    #[test]
+    fn round_trips_text_containing_quotes() {
+        let text = r#"he said "hi" and left"#;
+        let q = build_poll_question(text);
+        assert_eq!(parse_poll_question(&q), Some(text));
+    }
+
+    #[test]
+    fn round_trips_emoji_and_newlines() {
+        let text = "⚠\u{fe0f} line one\nline two (￣ヘ￣)";
+        let q = build_poll_question(text);
+        assert_eq!(parse_poll_question(&q), Some(text));
+    }
+
+    #[test]
+    fn rejects_invalid_questions() {
+        assert_eq!(parse_poll_question("What's your favorite color?"), None);
+        assert_eq!(parse_poll_question(""), None);
+    }
+
+    #[test]
+    fn max_length_quote_fits_in_a_poll_question() {
+        let text = "a".repeat(max_quote_chars());
+        assert_eq!(
+            build_poll_question(&text).chars().count(),
+            POLL_QUESTION_MAX
+        );
+    }
 }
