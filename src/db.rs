@@ -168,6 +168,13 @@ pub async fn is_chat_authorized(db: &SqlitePool, chat_id: ChatId) -> bool {
         .unwrap_or(false)
 }
 
+/// All chats the bot is authorized in
+pub async fn list_authorized_chats(db: &SqlitePool) -> Result<Vec<i64>, sqlx::Error> {
+    sqlx::query_scalar("SELECT chat_id FROM authorized_chats")
+        .fetch_all(db)
+        .await
+}
+
 /// Fetch all stored banned words grouped by chat_id
 pub async fn load_banned_words(
     db: &SqlitePool,

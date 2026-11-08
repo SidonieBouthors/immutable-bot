@@ -7,6 +7,7 @@ use teloxide::{
 use crate::{
     BotState,
     db::{self, SqliteRequestError, is_chat_authorized},
+    handlers::register_admin_commands,
     utils::check_admin,
 };
 
@@ -36,6 +37,8 @@ pub async fn handle_authorize(
             .execute(&state.db)
             .await
             .map_err(SqliteRequestError)?;
+
+        register_admin_commands(&bot, msg.chat.id, state.admin_id).await;
 
         bot.send_message(
             msg.chat.id,

@@ -5,9 +5,13 @@ pub mod link_rewrite;
 pub mod quotes;
 pub mod voting;
 
-use teloxide::{prelude::*, types::Message, utils::command::BotCommands};
-
 use crate::{BotState, db::is_chat_authorized};
+use teloxide::{
+    payloads::SetMyCommandsSetters,
+    prelude::*,
+    types::{BotCommandScope, Message, Recipient},
+    utils::command::BotCommands,
+};
 
 use admin::{handle_authorize, handle_deauthorize, handle_set_threshold};
 use banned_words::{handle_propose_ban, handle_propose_unban};
@@ -31,12 +35,33 @@ pub enum Command {
     Ban(String),
     #[command(description = "Propose unbanning a word (needs votes)")]
     Unban(String),
+}
+
+#[derive(BotCommands, Clone)]
+#[command(rename_rule = "lowercase", description = "Commands:")]
+pub enum AdminCommand {
     #[command(description = "Admin: Authorize this chat for bot use")]
     Authorize,
     #[command(description = "Admin: Deauthorize this chat")]
     Deauthorize,
     #[command(description = "Admin: Set votes needed to ban / unban a word (number or 'default')")]
-    SetThreshold(String),
+    SetVoteCount(String),
+}
+
+async fn check_authorized(
+    bot: &teloxide::Bot,
+    msg: &Message,
+    state: &BotState,
+) -> ResponseResult<bool> {
+    if is_chat_authorized(&state.db, msg.chat.id).await {
+        return Ok(true);
+    }
+    bot.send_message(
+        msg.chat.id,
+        "❌ This chat is not authorized to talk to me (╭ರ_•́)",
+    )
+    .await?;
+    Ok(false)
 }
 
 pub async fn answer(
@@ -45,14 +70,7 @@ pub async fn answer(
     cmd: Command,
     state: BotState,
 ) -> ResponseResult<()> {
-    let requires_auth = !matches!(cmd, Command::Authorize | Command::Deauthorize);
-
-    if requires_auth && !is_chat_authorized(&state.db, msg.chat.id).await {
-        bot.send_message(
-            msg.chat.id,
-            "❌ This chat is not authorized to talk to me (╭ರ_•́)",
-        )
-        .await?;
+    if !check_authorized(&bot, &msg, &state).await? {
         return Ok(());
     }
 
@@ -68,8 +86,40 @@ pub async fn answer(
         Command::Hug => handle_hug(bot, msg).await,
         Command::Ban(word) => handle_propose_ban(bot, msg, state, word).await,
         Command::Unban(word) => handle_propose_unban(bot, msg, state, word).await,
-        Command::Authorize => handle_authorize(bot, msg, state).await,
-        Command::Deauthorize => handle_deauthorize(bot, msg, state).await,
-        Command::SetThreshold(arg) => handle_set_threshold(bot, msg, state, arg).await,
+    }
+}
+
+pub async fn answer_admin(
+    bot: teloxide::Bot,
+    msg: Message,
+    cmd: AdminCommand,
+    state: BotState,
+) -> ResponseResult<()> {
+    let requires_auth = !matches!(cmd, AdminCommand::Authorize | AdminCommand::Deauthorize);
+    if requires_auth && !check_authorized(&bot, &msg, &state).await? {
+        return Ok(());
+    }
+
+    match cmd {
+        AdminCommand::Authorize => handle_authorize(bot, msg, state).await,
+        AdminCommand::Deauthorize => handle_deauthorize(bot, msg, state).await,
+        AdminCommand::SetVoteCount(arg) => handle_set_threshold(bot, msg, state, arg).await,
+    }
+}
+
+/// Shows the admin the public and admin commands in this chat's menu
+pub async fn register_admin_commands(bot: &teloxide::Bot, chat_id: ChatId, admin_id: UserId) {
+    let mut commands = Command::bot_commands();
+    commands.extend(AdminCommand::bot_commands());
+
+    if let Err(e) = bot
+        .set_my_commands(commands)
+        .scope(BotCommandScope::ChatMember {
+            chat_id: Recipient::Id(chat_id),
+            user_id: admin_id,
+        })
+        .await
+    {
+        log::warn!("set_my_commands for the admin in chat {chat_id} failed: {e}");
     }
 }

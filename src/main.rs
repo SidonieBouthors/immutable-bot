@@ -8,10 +8,12 @@ use std::{
 };
 
 use sqlx::sqlite::SqlitePool;
-use teloxide::prelude::*;
+use teloxide::{prelude::*, utils::command::BotCommands};
 use tokio::sync::RwLock;
 
-use crate::handlers::{Command, answer, link_rewrite::handle_link_rewrite};
+use crate::handlers::{
+    AdminCommand, Command, answer, answer_admin, link_rewrite::handle_link_rewrite,
+};
 
 #[derive(Clone)]
 struct BotState {
@@ -60,6 +62,21 @@ async fn main() {
         banned_words: Arc::new(RwLock::new(banned_words)),
     };
 
+    // Command menu for everyone
+    if let Err(e) = bot.set_my_commands(Command::bot_commands()).await {
+        log::warn!("set_my_commands failed: {e}");
+    }
+
+    // Command menu for admin in authorized chats
+    match db::list_authorized_chats(&bot_state.db).await {
+        Ok(chats) => {
+            for chat_id in chats {
+                handlers::register_admin_commands(&bot, ChatId(chat_id), bot_state.admin_id).await;
+            }
+        }
+        Err(e) => log::warn!("could not list authorized chats: {e}"),
+    }
+
     log::info!("Bot started successfully!");
 
     let handler = dptree::entry()
@@ -68,6 +85,12 @@ async fn main() {
             Update::filter_message()
                 .filter_command::<Command>()
                 .endpoint(answer),
+        )
+        // Admin-only command handlers
+        .branch(
+            Update::filter_message()
+                .filter_command::<AdminCommand>()
+                .endpoint(answer_admin),
         )
         // Banned words filter
         .branch(
