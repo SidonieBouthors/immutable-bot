@@ -146,7 +146,7 @@ const RULES: &[Rule] = &[
             "youtu.be",
         ],
         matches: any_path,
-        params: ParamPolicy::Remove(&["si", "feature", "pp"]),
+        params: ParamPolicy::Keep(&["v", "list", "t", "start", "end"]),
         rewrite_host: None,
     },
     Rule {
