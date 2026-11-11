@@ -41,8 +41,10 @@ pub async fn handle_quote(bot: teloxide::Bot, msg: Message, state: BotState) -> 
         return Ok(());
     };
 
-    let Some(text) = replied_msg.text() else {
-        bot.send_message(msg.chat.id, "⚠️ Can only save text messages (ᵕ—ᴗ—)")
+    let text = replied_msg.text().or_else(|| replied_msg.caption());
+
+    let Some(text) = text else {
+        bot.send_message(msg.chat.id, "⚠️ Can only save text messages or media captions (ᵕ—ᴗ—)")
             .await?;
         return Ok(());
     };
