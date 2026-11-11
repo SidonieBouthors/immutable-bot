@@ -107,7 +107,7 @@ pub async fn handle_set_threshold(
             _ => {
                 bot.send_message(
                     msg.chat.id,
-                    "⚠️ Usage: /setthreshold <number ≥ 1 | default>",
+                    "⚠️ Usage: /setvotecount <number ≥ 1 | default>",
                 )
                 .await?;
                 return Ok(());

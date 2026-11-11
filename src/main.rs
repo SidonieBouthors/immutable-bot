@@ -77,6 +77,25 @@ async fn main() {
         Err(e) => log::warn!("could not list authorized chats: {e}"),
     }
 
+    // TEMPORARY: give proposals that were open before for/against voting the new keyboard
+    match db::list_open_votes(&bot_state.db).await {
+        Ok(votes) => {
+            for (msg_id, chat_id, required, agree, against) in votes {
+                if let Err(e) = bot
+                    .edit_message_reply_markup(
+                        ChatId(chat_id),
+                        teloxide::types::MessageId(msg_id as i32),
+                    )
+                    .reply_markup(handlers::voting::vote_keyboard(agree, against, required))
+                    .await
+                {
+                    log::warn!("could not redraw proposal {msg_id} in chat {chat_id}: {e}");
+                }
+            }
+        }
+        Err(e) => log::warn!("could not list open votes: {e}"),
+    }
+
     log::info!("Bot started successfully!");
 
     let handler = dptree::entry()

@@ -103,12 +103,18 @@ pub async fn create_tables(db: &SqlitePool) -> Result<(), sqlx::Error> {
             msg_id INTEGER NOT NULL,
             chat_id INTEGER NOT NULL,
             user_id INTEGER NOT NULL,
+            agree INTEGER NOT NULL DEFAULT 1,
             PRIMARY KEY (msg_id, chat_id, user_id)
         )
         "#,
     )
     .execute(db)
     .await?;
+
+    // Migration: add agree column to vote_signatures, defaulting to 1 for existing rows
+    let _ = sqlx::query("ALTER TABLE vote_signatures ADD COLUMN agree INTEGER NOT NULL DEFAULT 1")
+        .execute(db)
+        .await;
 
     // Details for votes about banned words
     sqlx::query(
@@ -141,12 +147,19 @@ pub async fn create_tables(db: &SqlitePool) -> Result<(), sqlx::Error> {
             chat_id INTEGER NOT NULL,
             quote_text TEXT NOT NULL,
             user_id INTEGER NOT NULL,
+            author TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (msg_id, chat_id)
         )
         "#,
     )
     .execute(db)
     .await?;
+
+    // Migration: add the author to databases created before it existed
+    let _ =
+        sqlx::query("ALTER TABLE quote_vote_details ADD COLUMN author TEXT NOT NULL DEFAULT ''")
+            .execute(db)
+            .await;
 
     // At most one open vote per quote per chat
     sqlx::query(
@@ -243,8 +256,15 @@ impl WordAction {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VoteSubject {
-    Word { word: String, action: WordAction },
-    Quote { text: String, user_id: i64 },
+    Word {
+        word: String,
+        action: WordAction,
+    },
+    Quote {
+        text: String,
+        user_id: i64,
+        author: String,
+    },
 }
 
 impl VoteSubject {
@@ -270,7 +290,11 @@ pub async fn has_open_vote(
                 .fetch_optional(db)
                 .await?
         }
-        VoteSubject::Quote { text, user_id } => {
+        VoteSubject::Quote {
+            text,
+            user_id,
+            author: _,
+        } => {
             sqlx::query_as(
                 "SELECT 1 FROM quote_vote_details
                  WHERE chat_id = ? AND quote_text = ? AND user_id = ?",
@@ -316,15 +340,20 @@ pub async fn create_vote(
             .execute(&mut *tx)
             .await?;
         }
-        VoteSubject::Quote { text, user_id } => {
+        VoteSubject::Quote {
+            text,
+            user_id,
+            author,
+        } => {
             sqlx::query(
-                "INSERT INTO quote_vote_details (msg_id, chat_id, quote_text, user_id)
-                 VALUES (?, ?, ?, ?)",
+                "INSERT INTO quote_vote_details (msg_id, chat_id, quote_text, user_id, author)
+                 VALUES (?, ?, ?, ?, ?)",
             )
             .bind(msg_id)
             .bind(chat_id)
             .bind(text)
             .bind(user_id)
+            .bind(author)
             .execute(&mut *tx)
             .await?;
         }
@@ -354,46 +383,144 @@ pub async fn get_required_votes(db: &SqlitePool, msg_id: i64, chat_id: i64) -> O
         })
 }
 
-/// Registers a user vote. Ok(Some(total)) if new, Ok(None) if already voted
-pub async fn register_user_vote(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VoteTally {
+    pub agree: i64,
+    pub against: i64,
+}
+
+/// Current agree / against counts for an open vote.
+pub async fn vote_tally(
+    db: &SqlitePool,
+    msg_id: i64,
+    chat_id: i64,
+) -> Result<VoteTally, sqlx::Error> {
+    let (agree, against): (i64, i64) = sqlx::query_as(
+        "SELECT COALESCE(SUM(agree), 0), COALESCE(SUM(1 - agree), 0)
+         FROM vote_signatures WHERE msg_id = ? AND chat_id = ?",
+    )
+    .bind(msg_id)
+    .bind(chat_id)
+    .fetch_one(db)
+    .await?;
+    Ok(VoteTally { agree, against })
+}
+
+/// Records a vote, or switches the user's earlier vote to the other side.
+/// Returns the new tally, or None if the user already voted that way.
+pub async fn cast_vote(
     db: &SqlitePool,
     msg_id: i64,
     chat_id: i64,
     user_id: i64,
-) -> Result<Option<i64>, sqlx::Error> {
+    agree: bool,
+) -> Result<Option<VoteTally>, sqlx::Error> {
+    // The WHERE makes the update a no-op when the direction is unchanged,
+    // so rows_affected is 0 exactly when nothing changed
     let res = sqlx::query(
-        "INSERT OR IGNORE INTO vote_signatures (msg_id, chat_id, user_id) VALUES (?, ?, ?)",
+        "INSERT INTO vote_signatures (msg_id, chat_id, user_id, agree) VALUES (?, ?, ?, ?)
+         ON CONFLICT (msg_id, chat_id, user_id)
+         DO UPDATE SET agree = excluded.agree
+         WHERE vote_signatures.agree != excluded.agree",
     )
     .bind(msg_id)
     .bind(chat_id)
     .bind(user_id)
+    .bind(agree)
     .execute(db)
     .await?;
 
     if res.rows_affected() == 0 {
         return Ok(None);
     }
-
-    let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM vote_signatures WHERE msg_id = ? AND chat_id = ?")
-            .bind(msg_id)
-            .bind(chat_id)
-            .fetch_one(db)
-            .await?;
-
-    Ok(Some(count))
+    Ok(Some(vote_tally(db, msg_id, chat_id).await?))
 }
 
-/// Closes a vote and applies its effect in one transaction.
-/// Returns the subject only to the caller that actually closed it.
-pub async fn finalize_vote(
+impl VoteSubject {
+    /// Deletes detail records for a vote and optionally applies its side effects.
+    async fn delete_and_apply(
+        kind: &str,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        msg_id: i64,
+        chat_id: i64,
+        apply_effect: bool,
+    ) -> Result<Self, sqlx::Error> {
+        match kind {
+            "word" => {
+                let (word, action): (String, String) = sqlx::query_as(
+                    "DELETE FROM word_vote_details WHERE msg_id = ? AND chat_id = ?
+                     RETURNING word, action",
+                )
+                .bind(msg_id)
+                .bind(chat_id)
+                .fetch_one(&mut **tx)
+                .await?;
+
+                let action = WordAction::parse(&action).ok_or_else(|| {
+                    sqlx::Error::Decode(format!("bad word action: {action}").into())
+                })?;
+
+                if apply_effect {
+                    let sql = match action {
+                        WordAction::Ban => {
+                            "INSERT OR IGNORE INTO banned_words (chat_id, word) VALUES (?, ?)"
+                        }
+                        WordAction::Unban => {
+                            "DELETE FROM banned_words WHERE chat_id = ? AND word = ?"
+                        }
+                    };
+                    sqlx::query(sql)
+                        .bind(chat_id)
+                        .bind(&word)
+                        .execute(&mut **tx)
+                        .await?;
+                }
+
+                Ok(VoteSubject::Word { word, action })
+            }
+            "quote" => {
+                let (text, user_id, author): (String, i64, String) = sqlx::query_as(
+                    "DELETE FROM quote_vote_details WHERE msg_id = ? AND chat_id = ?
+                     RETURNING quote_text, user_id, author",
+                )
+                .bind(msg_id)
+                .bind(chat_id)
+                .fetch_one(&mut **tx)
+                .await?;
+
+                if apply_effect {
+                    sqlx::query(
+                        "DELETE FROM quotes WHERE chat_id = ? AND message_text = ? AND user_id = ?",
+                    )
+                    .bind(chat_id)
+                    .bind(&text)
+                    .bind(user_id)
+                    .execute(&mut **tx)
+                    .await?;
+                }
+
+                Ok(VoteSubject::Quote {
+                    text,
+                    user_id,
+                    author,
+                })
+            }
+            other => Err(sqlx::Error::Decode(
+                format!("unknown vote kind: {other}").into(),
+            )),
+        }
+    }
+}
+
+async fn close_vote(
     db: &SqlitePool,
     msg_id: i64,
     chat_id: i64,
+    apply_effect: bool,
 ) -> Result<Option<VoteSubject>, sqlx::Error> {
     let mut tx = db.begin().await?;
 
-    // Deleting the core row is what makes only one caller win
+    // Deleting the core row ensures only one caller wins the race condition
     let kind: Option<String> =
         sqlx::query_scalar("DELETE FROM votes WHERE msg_id = ? AND chat_id = ? RETURNING kind")
             .bind(msg_id)
@@ -405,61 +532,9 @@ pub async fn finalize_vote(
         return Ok(None);
     };
 
-    let subject = match kind.as_str() {
-        "word" => {
-            let (word, action): (String, String) = sqlx::query_as(
-                "DELETE FROM word_vote_details WHERE msg_id = ? AND chat_id = ?
-                 RETURNING word, action",
-            )
-            .bind(msg_id)
-            .bind(chat_id)
-            .fetch_one(&mut *tx)
-            .await?;
-
-            let action = WordAction::parse(&action)
-                .ok_or_else(|| sqlx::Error::Decode(format!("bad word action: {action}").into()))?;
-
-            let sql = match action {
-                WordAction::Ban => {
-                    "INSERT OR IGNORE INTO banned_words (chat_id, word) VALUES (?, ?)"
-                }
-                WordAction::Unban => "DELETE FROM banned_words WHERE chat_id = ? AND word = ?",
-            };
-            sqlx::query(sql)
-                .bind(chat_id)
-                .bind(&word)
-                .execute(&mut *tx)
-                .await?;
-
-            VoteSubject::Word { word, action }
-        }
-        "quote" => {
-            let (text, user_id): (String, i64) = sqlx::query_as(
-                "DELETE FROM quote_vote_details WHERE msg_id = ? AND chat_id = ?
-                 RETURNING quote_text, user_id",
-            )
-            .bind(msg_id)
-            .bind(chat_id)
-            .fetch_one(&mut *tx)
-            .await?;
-
-            sqlx::query(
-                "DELETE FROM quotes WHERE chat_id = ? AND message_text = ? AND user_id = ?",
-            )
-            .bind(chat_id)
-            .bind(&text)
-            .bind(user_id)
-            .execute(&mut *tx)
-            .await?;
-
-            VoteSubject::Quote { text, user_id }
-        }
-        other => {
-            return Err(sqlx::Error::Decode(
-                format!("unknown vote kind: {other}").into(),
-            ));
-        }
-    };
+    // Delegate detail cleanup and effect application to VoteSubject
+    let subject =
+        VoteSubject::delete_and_apply(&kind, &mut tx, msg_id, chat_id, apply_effect).await?;
 
     sqlx::query("DELETE FROM vote_signatures WHERE msg_id = ? AND chat_id = ?")
         .bind(msg_id)
@@ -469,6 +544,42 @@ pub async fn finalize_vote(
 
     tx.commit().await?;
     Ok(Some(subject))
+}
+
+/// TEMPORARY: used once at startup to redraw the keyboards of proposals that
+/// were open before for/against voting
+pub async fn list_open_votes(
+    db: &SqlitePool,
+) -> Result<Vec<(i64, i64, i64, i64, i64)>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT v.msg_id, v.chat_id, v.required,
+                COALESCE(SUM(s.agree), 0), COALESCE(SUM(1 - s.agree), 0)
+         FROM votes v
+         LEFT JOIN vote_signatures s ON s.msg_id = v.msg_id AND s.chat_id = v.chat_id
+         GROUP BY v.msg_id, v.chat_id, v.required",
+    )
+    .fetch_all(db)
+    .await
+}
+
+/// Closes a vote and applies its effect in one transaction
+/// Returns the subject only to the caller that actually closed it
+pub async fn pass_vote(
+    db: &SqlitePool,
+    msg_id: i64,
+    chat_id: i64,
+) -> Result<Option<VoteSubject>, sqlx::Error> {
+    close_vote(db, msg_id, chat_id, true).await
+}
+
+/// Closes a vote without applying anything
+/// Returns the subject only to the caller that actually closed it
+pub async fn reject_vote(
+    db: &SqlitePool,
+    msg_id: i64,
+    chat_id: i64,
+) -> Result<Option<VoteSubject>, sqlx::Error> {
+    close_vote(db, msg_id, chat_id, false).await
 }
 
 #[cfg(test)]
@@ -500,12 +611,9 @@ mod tests {
         create_vote(&db, 10, 1, 100, 2, &subject).await.unwrap();
 
         assert!(has_open_vote(&db, 1, &subject).await.unwrap());
-        assert_eq!(
-            finalize_vote(&db, 10, 1).await.unwrap(),
-            Some(subject.clone())
-        );
+        assert_eq!(pass_vote(&db, 10, 1).await.unwrap(), Some(subject.clone()));
         // A second closer gets nothing
-        assert_eq!(finalize_vote(&db, 10, 1).await.unwrap(), None);
+        assert_eq!(pass_vote(&db, 10, 1).await.unwrap(), None);
         assert!(!has_open_vote(&db, 1, &subject).await.unwrap());
 
         let banned = load_banned_words(&db).await.unwrap();
@@ -523,23 +631,10 @@ mod tests {
         create_vote(&db, 10, 1, 100, 2, &word("he", WordAction::Unban))
             .await
             .unwrap();
-        finalize_vote(&db, 10, 1).await.unwrap();
+        pass_vote(&db, 10, 1).await.unwrap();
 
         let banned = load_banned_words(&db).await.unwrap();
         assert!(banned.get(&1).is_none_or(|s| !s.contains("he")));
-    }
-
-    #[tokio::test]
-    async fn votes_are_counted_once_per_user() {
-        let db = test_db().await;
-        create_vote(&db, 10, 1, 100, 3, &word("he", WordAction::Ban))
-            .await
-            .unwrap();
-
-        assert_eq!(register_user_vote(&db, 10, 1, 100).await.unwrap(), None); // proposer
-        assert_eq!(register_user_vote(&db, 10, 1, 200).await.unwrap(), Some(2));
-        assert_eq!(get_required_votes(&db, 10, 1).await, Some(3));
-        assert_eq!(get_required_votes(&db, 99, 1).await, None);
     }
 
     #[tokio::test]
@@ -556,6 +651,7 @@ mod tests {
         VoteSubject::Quote {
             text: text.into(),
             user_id,
+            author: "@x".into(),
         }
     }
 
@@ -591,9 +687,9 @@ mod tests {
         create_vote(&db, 10, 1, 100, 2, &subject).await.unwrap();
         assert_eq!(quote_count(&db).await, 5); // nothing deleted before it passes
 
-        assert_eq!(finalize_vote(&db, 10, 1).await.unwrap(), Some(subject));
+        assert_eq!(pass_vote(&db, 10, 1).await.unwrap(), Some(subject));
         assert_eq!(quote_count(&db).await, 3);
-        assert_eq!(finalize_vote(&db, 10, 1).await.unwrap(), None);
+        assert_eq!(pass_vote(&db, 10, 1).await.unwrap(), None);
     }
 
     #[tokio::test]
@@ -613,5 +709,72 @@ mod tests {
         assert!(create_vote(&db, 11, 1, 101, 2, &subject).await.is_err());
         // rejected attempt leaves nothing behind
         assert_eq!(get_required_votes(&db, 11, 1).await, None);
+    }
+
+    #[tokio::test]
+    async fn votes_can_be_cast_and_switched() {
+        let db = test_db().await;
+        // the proposer (user 100) counts as agree
+        create_vote(&db, 10, 1, 100, 3, &word("he", WordAction::Ban))
+            .await
+            .unwrap();
+        assert_eq!(
+            vote_tally(&db, 10, 1).await.unwrap(),
+            VoteTally {
+                agree: 1,
+                against: 0
+            }
+        );
+
+        assert_eq!(get_required_votes(&db, 10, 1).await, Some(3));
+        assert_eq!(get_required_votes(&db, 99, 1).await, None);
+
+        // a new vote against
+        assert_eq!(
+            cast_vote(&db, 10, 1, 200, false).await.unwrap(),
+            Some(VoteTally {
+                agree: 1,
+                against: 1
+            })
+        );
+        // the same direction again changes nothing
+        assert_eq!(cast_vote(&db, 10, 1, 200, false).await.unwrap(), None);
+        // switching sides moves the vote
+        assert_eq!(
+            cast_vote(&db, 10, 1, 200, true).await.unwrap(),
+            Some(VoteTally {
+                agree: 2,
+                against: 0
+            })
+        );
+        // even the proposer can switch
+        assert_eq!(
+            cast_vote(&db, 10, 1, 100, false).await.unwrap(),
+            Some(VoteTally {
+                agree: 1,
+                against: 1
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_vote_applies_nothing_and_can_be_proposed_again() {
+        let db = test_db().await;
+        let subject = word("he", WordAction::Ban);
+        create_vote(&db, 10, 1, 100, 2, &subject).await.unwrap();
+
+        assert_eq!(
+            reject_vote(&db, 10, 1).await.unwrap(),
+            Some(subject.clone())
+        );
+        // a second closer gets nothing
+        assert_eq!(reject_vote(&db, 10, 1).await.unwrap(), None);
+
+        assert!(!has_open_vote(&db, 1, &subject).await.unwrap());
+        let banned = load_banned_words(&db).await.unwrap();
+        assert!(banned.get(&1).is_none_or(|s| !s.contains("he")));
+
+        // the same word can be proposed again
+        create_vote(&db, 11, 1, 101, 2, &subject).await.unwrap();
     }
 }

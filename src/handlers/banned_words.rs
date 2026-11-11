@@ -156,7 +156,7 @@ pub async fn handle_propose_unban(
     propose_word_action(bot, msg, state, word, WordAction::Unban).await
 }
 
-/// Update the in-memory cache. Call only after finalize_vote succeeded
+/// Update the in-memory cache. Call only after pass_vote succeeded
 pub(crate) async fn update_cache(state: &BotState, chat_id: i64, word: &str, action: WordAction) {
     let mut map = state.banned_words.write().await;
     match action {

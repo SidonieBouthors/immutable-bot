@@ -277,6 +277,7 @@ pub async fn handle_yeet(bot: teloxide::Bot, msg: Message, state: BotState) -> R
     let subject = VoteSubject::Quote {
         text: quote_text.to_string(),
         user_id: first.user_id,
+        author: author_display.clone(),
     };
     let title = format!("Remove this quote by {author_display}?\n\"{quote_text}\"");
 
